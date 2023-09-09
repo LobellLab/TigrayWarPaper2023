@@ -1,0 +1,365 @@
+---
+title: "Causal_inference_NatFood"
+output: html_document
+date: "2023-06-24"
+author: Liya Weldegebriel
+---
+Description: 
+- imports daily rainfall, cultivation status and number of conflict incidences data using 10 by 10 km grid data
+- calculates two-way fixed effect estimates of the impact of the number of conflict incidence on area of well-cultivated land with rainfall characterstic covariates
+
+
+```{r}
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(reshape2)
+library(fixest)
+
+```
+
+#Import data
+
+```{r}
+files.location <- paste0('UPDATE WITH YOUR FILE LOCATION') #Update with local file location for all data
+
+```
+
+##Importing daily rainfall 2019 to 2021 
+
+```{r}
+setwd(files.location) 
+read.csv("Precip_daily_Tigray_19to21_529grids.csv")-> daily.precip
+```
+
+
+
+##Importing Cultivatetion status datafrom pre-war (2019/2020) and post-war (2021) periods
+
+```{r}
+setwd(files.location) 
+
+read.csv("CultArea_cropgrass_1200_10k_2021.csv")%>%
+  mutate(., cult_area = X1, year = 2021) %>%
+  select(., c(id,cult_area,year)) ->stat_21
+
+read.csv("CultArea_cropgrass_1200_10k_2020.csv")%>%
+  mutate(., cult_area = X1, year = 2020)%>%
+  select(., c(id,cult_area, year))->stat_20
+
+rbind(stat_21, stat_20)%>%
+  mutate(., cult_area = cult_area/1E6)-> cult_stat
+
+head(cult_stat)
+```
+
+##Importing conflict incidence data
+
+```{r}
+setwd(files.location) 
+
+read.csv("CI_count_10k.csv")%>%
+  mutate(., grid_size = "ten_k")%>%
+  group_by(id, grid_size)%>%
+  summarise(count = sum(n_CI))-> grid_CI_count
+
+grid_CI_count%>%
+  mutate(., CI = count)%>%
+  select(., c("id","CI"))-> CI
+head(CI) 
+```
+
+
+```{r}
+setwd(files.location) 
+
+read.csv("CI_count_10k.csv")-> CI_raw
+
+
+with(CI_raw, 
+     ifelse(month == "2020" ,'early',
+     ifelse(month == "jan" ,'early',
+     ifelse(month == "feb" ,'prep', 
+     ifelse(month == "march" ,'prep',
+     ifelse(month == "april" ,'prep',
+     ifelse(month == "may" ,'prep',
+     ifelse(month == "june" ,'growing',
+     ifelse(month == "july" ,'growing',
+     ifelse(month == "aug" ,'growing',
+     ifelse(month == "sept" ,'growing',
+     ifelse(month == "oct" ,'growing', "NA"))))))))))))-> CI_raw$time.group
+
+CI_raw%>%
+  filter(., time.group == "prep")%>%
+  mutate(., CI = n_CI)%>%
+  select(., c(id,CI))-> CI_prep
+
+CI_raw%>%
+  filter(., time.group == "early")%>%
+  mutate(., CI = n_CI)%>%
+  select(., c(id,CI))-> CI_early
+
+CI_raw%>%
+  filter(., time.group == "prep" | time.group == "growing" )%>%
+  mutate(., CI = n_CI)%>%
+  select(., c(id,CI))-> CI_prep_growing
+
+CI_raw%>%
+  filter(., time.group == "growing" )%>%
+  mutate(., CI = n_CI)%>%
+  select(., c(id,CI))-> CI_growing
+
+CI_prep
+CI_early
+CI_prep_growing
+CI_growing
+```
+
+
+
+#Rainfall characterstics
+
+```{r}
+require(lubridate)
+
+daily.precip%>%
+  mutate( day = date, Rain = precipitation )%>%
+  mutate('date' = make_date(year = year, month = month, day = date))%>%
+  select(., c("date","day","month","year", "id","Rain")) -> rf
+head(rf)
+
+```
+
+
+
+```{r}
+rf%>%
+  filter(month %in% unique(.$month)[c(6,7,8,9)]) -> Kiremt_rf #June to Sept
+
+head(Kiremt_rf)
+```
+
+
+##Rainfall Frequency
+
+
+Initializing a data frame
+```{r}
+frequency_initial <- data.frame(Rain_day=numeric(),
+                           No_Rain_day=numeric(),
+                           NA_s=numeric(),
+                           frequency_RF=numeric(),
+                           year = integer(),
+                           id = integer(),
+                           stringsAsFactors=FALSE)
+
+temp_Rain <- data.frame(Rain_day=numeric(),
+                           No_Rain_day=numeric(),
+                           NA_s=numeric(),
+                           frequency_RF=numeric(),
+                           year = integer(),
+                           id = integer(),
+                        
+                           stringsAsFactors=FALSE)
+
+```
+
+Rainfall frequency function 
+```{r}
+freq <- function(Stations_Data) {
+  
+  yr_id <- c(2019,2020,2021)
+  id <- c(0:528)
+  
+  for(i in yr_id){  
+    for(j in id){
+      
+      Stations_Data%>%
+        filter(id == j)%>%
+        filter(year == i) ->V
+      
+        length(which(V$Rain!=0))-> frequency_initial[1,"Rain_day"]
+        length(which(V$Rain==0)) -> frequency_initial[1,"No_Rain_day"]
+        length(which(is.na(V$Rain))) -> frequency_initial[1,"NA_s"]
+      
+      frequency_initial$year <- i
+      frequency_initial$id <- j
+      
+   
+      temp_Rain <- rbind(temp_Rain,frequency_initial)
+    }
+  }
+  return(temp_Rain)
+}
+```
+
+
+```{r}
+freq(Stations_Data = Kiremt_rf)-> Rainfall_Frequency_Kiremt
+
+Rainfall_Frequency_Kiremt$Rain_day/Rainfall_Frequency_Kiremt$No_Rain_day-> Rainfall_Frequency_Kiremt$frequency_RF 
+Rainfall_Frequency_Kiremt
+
+```
+```{r}
+Rainfall_Frequency_Kiremt%>%
+  group_by(year)%>%
+  summarise_at(c("frequency_RF"), mean, na.rm=TRUE)-> meanRFfreq
+
+meanRFfreq$year <- as.factor(meanRFfreq$year)
+
+```
+
+
+
+##Mean rainfall
+
+```{r}
+mean_initials <- data.frame(Mean_Kiremt=numeric(),
+                           year = integer(),
+                           id = integer(),
+                           stringsAsFactors=FALSE )
+
+temp_MeanRains <- data.frame(Mean_Kiremt=numeric(),
+                           year = integer(),
+                           id = integer(),
+                           stringsAsFactors=FALSE )
+
+Mean_rain <- function(Stations_Data) {
+  
+  yr_id <- c(2019,2020,2021)
+  id <- c(0:529)
+  
+  for(i in yr_id){  
+    for(j in id){
+      
+      Stations_Data%>%
+        filter(id == j)%>%
+        filter(year == i)->V_kiremt
+      
+    V_kiremt%>%
+      filter(., Rain!=0) -> V_kiremt
+          
+      mean(V_kiremt$Rain, na.rm= TRUE) ->mean_initials[1,"Mean_Kiremt"]
+          
+      
+        
+      mean_initials$year <- i
+      mean_initials$id <- j
+      
+   
+      temp_MeanRains <- rbind(temp_MeanRains,mean_initials)
+    }
+  }
+  return(temp_MeanRains)
+}
+
+```
+
+Finding Means
+```{r}
+Mean_rain(Stations_Data =Kiremt_rf )-> Rainfall_Mean
+Rainfall_Mean
+```
+
+
+##Cumulative rainfall
+
+```{r}
+Kiremt_rf%>%
+  dplyr::select(Rain, id, year)%>%
+  group_by(id, year)%>%
+  summarize(Rain_Cum=sum(Rain,na.rm=TRUE))-> Rainfall_cum_kiremt
+Rainfall_cum_kiremt
+
+rf%>%
+  dplyr::select(Rain, id, year)%>%
+  group_by(id, year)%>%
+  summarize(Rain_Cum=sum(Rain,na.rm=TRUE))-> Rainfall_cum_annual
+Rainfall_cum_annual
+
+
+Rainfall_cum_annual%>%
+  group_by(id) %>%
+  summarise_at(vars(-year), funs(mean(., na.rm=TRUE))) ->Mean_Annual_rain
+
+head(Mean_Annual_rain)
+```
+
+##Summary of cumulative, mean and frequency of kiremt rainfall
+
+```{r}
+head(Rainfall_cum_kiremt)
+head(Rainfall_Mean)
+head(Rainfall_Frequency_Kiremt)
+
+```
+
+Combining RF characteristics
+```{r}
+Rainfall_Frequency_Kiremt %>%
+  select(., c(frequency_RF, year, id))%>%
+  merge(., Rainfall_Mean, by = c("year","id"))%>%
+  merge(.,Rainfall_cum_kiremt, by = c("year","id") ) -> rf_summary
+
+head(rf_summary)
+```
+##RF summary
+
+```{r}
+rf_summary$year = ifelse(rf_summary$year <= 2020, 2020, 2021)
+
+rf_summary%>%
+  group_by(id,year)%>%
+    summarise_at(c("frequency_RF", "Mean_Kiremt", "Rain_Cum"), mean, na.rm=TRUE)-> rf.data
+
+head(rf.data)
+
+```
+
+
+#Causal inference analysis via TWFE
+
+```{r}
+twfe_function <- function(rf.data, cult.data, CI.data){
+  
+  
+rf.data%>%
+   merge(., cult.data, by = c("id", "year"))%>%
+   merge(., CI.data, by = "id") -> rf_twfe
+
+rf_twfe$CI = ifelse(rf_twfe$year == 2020, 0, rf_twfe$CI) #replace all year 2020 CI with 0
+
+
+rf_twfe$id <- as.factor(rf_twfe$id)
+rf_twfe$year <- as.factor(rf_twfe$year)
+
+
+
+return(summary(feols(cult_area ~ CI + Rain_Cum + frequency_RF + Mean_Kiremt | id + year, data = rf_twfe)))
+  
+  
+}
+```
+
+
+
+##Using All CIs
+```{r}
+twfe_function(rf.data, cult_stat, CI)
+```
+##Using Growing CIs
+```{r}
+twfe_function(rf.data, cult_stat, CI_growing)
+```
+
+##Using Prep CIs
+```{r}
+twfe_function(rf.data, cult_stat, CI_prep)
+```
+
+##Using Early CIs
+```{r}
+twfe_function(rf.data, cult_stat, CI_early)
+```
+
